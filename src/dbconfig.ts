@@ -15,7 +15,7 @@ async function getEm() {
   // Initialize connection
   await AppDataSource.initialize();
   // Sync the schema
-  await AppDataSource.synchronize(true);
+  await AppDataSource.synchronize();
 
   // Return the manage
   return AppDataSource.manager;

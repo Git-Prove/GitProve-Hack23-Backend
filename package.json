@@ -2,7 +2,7 @@
   "name": "hackyeah",
   "version": "0.1.0",
   "scripts": {
-    "start": "node ./lib/app.js",
+    "start": "nodemon ./lib/app.js",
     "build": "tsc"
   },
   "dependencies": {
@@ -11,6 +11,7 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-session": "^1.17.3",
+    "octokit": "^3.1.1",
     "passport": "^0.6.0",
     "passport-github2": "^0.1.12",
     "pg": "^8.11.3",
@@ -24,6 +25,7 @@
     "@types/node": "^20.8.0",
     "@types/passport": "^1.0.13",
     "@types/passport-github2": "^1.2.6",
+    "nodemon": "^3.0.1",
     "prettier": "3.0.3"
   }
 }
