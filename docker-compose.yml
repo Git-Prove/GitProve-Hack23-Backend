@@ -1,0 +1,22 @@
+version: "3.4"
+services:
+  db:
+    image: postgres:16
+    container_name: db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DB_PORT}:${DB_PORT}"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    env_file:
+      # relative to working directory where docker-compose was run from
+      - .env
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_PORT: ${DB_PORT}
+
+volumes:
+  db-data:
+    driver: local
