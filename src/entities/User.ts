@@ -15,6 +15,9 @@ export class User {
   @Column({ unique: true, type: "int" })
   githubId: number;
 
+  @Column({ unique: true, type: "text" })
+  ghUsername: string;
+
   @Column({ type: "text" })
   avatarUrl: string;
 

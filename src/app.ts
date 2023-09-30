@@ -7,7 +7,8 @@ import passport from "passport";
 import { Strategy as GitHubStrategy } from "passport-github2";
 import { globalEm } from "./dbconfig";
 import session from "express-session";
-import { TypeormStore } from "./TypeormStore";
+import { Octokit } from "octokit";
+import path from "path";
 
 const ghClientId = process.env.GITHUB_CLIENT_ID;
 const ghClientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -40,7 +41,7 @@ globalEm.then((em) => {
       {
         clientID: ghClientId,
         clientSecret: ghClientSecret,
-        callbackURL: "http://127.0.0.1:3000/auth/github/callback",
+        callbackURL: "http://127.0.0.1:3000/api/auth/github/callback",
       },
       async (accessToken: any, refreshToken: any, profile: any, done: any) => {
         console.log("Profile: ", profile);
@@ -56,6 +57,7 @@ globalEm.then((em) => {
           avatarUrl: profile.photos[0].value,
           name: profile.displayName,
           ghToken: accessToken,
+          ghUsername: profile.username,
           bio: profile._json.bio || "",
         });
 
@@ -90,27 +92,25 @@ globalEm.then((em) => {
   });
 
   const app = express();
-  app.use(passport.initialize());
   app.use(
     session({
-      store: new TypeormStore(em),
       secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
-      cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 }, // 30 days // TODO: secure: true
+      cookie: {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        // secure: false,
+        httpOnly: true,
+      }, // 30 days // TODO: secure: true
     })
   );
-  app.use(passport.authenticate("session"));
-  
+  app.use(passport.initialize());
+  app.use(passport.session());
+
   app.use(cors());
 
-  app.get("/", (req, res) => {
-    const user = req.user as User | undefined;
-    const link = user
-      ? `<a href="/logout">Logout</a>`
-      : `<a href="/auth/github">Login</a>`;
-    res.send(`Hello ${user?.name || "there"} ${link}`);
-  });
+  // Serve static react app
+  app.use(express.static(path.join(__dirname, "../public")));
 
   app.get(
     "/auth/github",
@@ -118,12 +118,19 @@ globalEm.then((em) => {
   );
 
   app.get(
-    "/auth/github/callback",
+    "/api/auth/github/callback",
     passport.authenticate("github", { failureRedirect: "/login" }),
     function (req, res) {
-      console.log("Logged in, redirecting");
+      const user = req.user as User | undefined;
+      console.log(`Logged in as ${user?.ghUsername}, redirecting`);
       // Successful authentication, redirect home.
-      res.redirect("http://localhost:5173/");
+      // Set the session cookie
+      req.session.save(() => {
+        console.log("Session saved");
+        // Add random cookie
+        res.cookie("test", "test", { maxAge: 900000, httpOnly: true });
+        res.redirect("/");
+      });
     }
   );
 
@@ -143,10 +150,17 @@ globalEm.then((em) => {
             res.status(404).send({ error: "User not found" });
             return;
           }
+          const octokit = new Octokit();
+          console.log("Username: ", user.ghUsername);
+          const repos = octokit.rest.repos.listForUser({
+            username: user.ghUsername,
+          });
+          console.log("Repos: ", user);
           res.send({
             id: user.id,
             name: user.name,
             avatarUrl: user.avatarUrl,
+            repos: repos,
           });
         });
     }
@@ -154,6 +168,10 @@ globalEm.then((em) => {
 
   app.get("/users/me", isAuthenticated, (req, res) => {
     const user = req.user as User | undefined;
+    // const octokit = new Octokit();
+    // const repos = octokit.rest.repos.listForUser({
+    //   username: user?.name,
+    // });
     res.send({
       name: user?.name,
       avatarUrl: user?.avatarUrl,
