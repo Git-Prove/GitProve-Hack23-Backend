@@ -9,6 +9,9 @@ export class User {
   @PrimaryGeneratedColumn("uuid")
   id: string;
 
+  @Column({ unique: true, type: "text" })
+  ghToken: string;
+
   @Column({ unique: true, type: "int" })
   githubId: number;
 
@@ -17,4 +20,7 @@ export class User {
 
   @Column({ type: "text" })
   name: string;
+
+  @Column({ type: "text" })
+  bio: string;
 }
