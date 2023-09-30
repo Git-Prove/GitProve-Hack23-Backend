@@ -2,6 +2,7 @@ import "reflect-metadata";
 import "./envConfig";
 import { User } from "./entities/User";
 import express from "express";
+import cors from "cors";
 import passport from "passport";
 import { Strategy as GitHubStrategy } from "passport-github2";
 import { globalEm } from "./dbconfig";
@@ -100,6 +101,8 @@ globalEm.then((em) => {
     })
   );
   app.use(passport.authenticate("session"));
+  
+  app.use(cors());
 
   app.get("/", (req, res) => {
     const user = req.user as User | undefined;
@@ -120,7 +123,7 @@ globalEm.then((em) => {
     function (req, res) {
       console.log("Logged in, redirecting");
       // Successful authentication, redirect home.
-      res.redirect("/");
+      res.redirect("http://localhost:5173/");
     }
   );
 
