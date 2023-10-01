@@ -7,7 +7,12 @@ import passport from "passport";
 import { Strategy as GitHubStrategy } from "passport-github2";
 import { globalEm } from "./dbconfig";
 import session from "express-session";
-import { TypeormStore } from "./TypeormStore";
+import { Octokit } from "octokit";
+import pg from "pg";
+import connectPg from "connect-pg-simple";
+import path from "path";
+import { simplifiedRepos } from "./utils";
+import { promptGpt } from "./gpt";
 
 const ghClientId = process.env.GITHUB_CLIENT_ID;
 const ghClientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -40,7 +45,7 @@ globalEm.then((em) => {
       {
         clientID: ghClientId,
         clientSecret: ghClientSecret,
-        callbackURL: "http://127.0.0.1:3000/auth/github/callback",
+        callbackURL: "http://127.0.0.1:3000/api/auth/github/callback",
       },
       async (accessToken: any, refreshToken: any, profile: any, done: any) => {
         console.log("Profile: ", profile);
@@ -48,6 +53,8 @@ globalEm.then((em) => {
         const existingUser = await userRepo.findOneBy({ githubId: profile.id });
 
         if (existingUser) {
+          existingUser.ghToken = accessToken;
+          await userRepo.save(existingUser);
           return done(null, existingUser);
         }
 
@@ -56,6 +63,7 @@ globalEm.then((em) => {
           avatarUrl: profile.photos[0].value,
           name: profile.displayName,
           ghToken: accessToken,
+          ghUsername: profile.username,
           bio: profile._json.bio || "",
         });
 
@@ -89,28 +97,38 @@ globalEm.then((em) => {
     });
   });
 
+  const pgSession = connectPg(session);
+  const pgPool = new pg.Pool({
+    host: "localhost",
+    port: parseInt(process.env.DB_PORT || "5432"),
+    user: process.env.DB_USER || "postgres",
+    password: process.env.DB_PASS || "postgres",
+    database: process.env.DB_NAME || "postgres",
+  });
   const app = express();
-  app.use(passport.initialize());
   app.use(
     session({
-      store: new TypeormStore(em),
+      store: new pgSession({
+        pool: pgPool,
+        tableName: "session",
+      }),
       secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
-      cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 }, // 30 days // TODO: secure: true
+      cookie: {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        // secure: false,
+        httpOnly: true,
+      }, // 30 days // TODO: secure: true
     })
   );
-  app.use(passport.authenticate("session"));
-  
+  app.use(passport.initialize());
+  app.use(passport.session());
+
   app.use(cors());
 
-  app.get("/", (req, res) => {
-    const user = req.user as User | undefined;
-    const link = user
-      ? `<a href="/logout">Logout</a>`
-      : `<a href="/auth/github">Login</a>`;
-    res.send(`Hello ${user?.name || "there"} ${link}`);
-  });
+  // Serve static react app
+  app.use(express.static(path.join(__dirname, "../public")));
 
   app.get(
     "/auth/github",
@@ -118,18 +136,27 @@ globalEm.then((em) => {
   );
 
   app.get(
-    "/auth/github/callback",
+    "/api/auth/github/callback",
     passport.authenticate("github", { failureRedirect: "/login" }),
     function (req, res) {
-      console.log("Logged in, redirecting");
+      const user = req.user as User | undefined;
+      console.log(`Logged in as ${user?.ghUsername}, redirecting`);
       // Successful authentication, redirect home.
-      res.redirect("http://localhost:5173/");
+      // Set the session cookie
+      req.session.save(() => {
+        console.log("Session saved");
+        // Add random cookie
+        res.cookie("test", "test", { maxAge: 900000, httpOnly: true });
+        res.redirect("/");
+      });
     }
   );
 
   app.get(
     "/users/profile/:profileId",
+    isAuthenticated,
     (req: express.Request<{ profileId?: string }>, res) => {
+      const loggedUser = req.user as User;
       const profileId = req.params.profileId;
       if (!profileId) {
         res.status(400).send({ error: "Missing profileId" });
@@ -143,21 +170,119 @@ globalEm.then((em) => {
             res.status(404).send({ error: "User not found" });
             return;
           }
-          res.send({
-            id: user.id,
-            name: user.name,
-            avatarUrl: user.avatarUrl,
+          const octokit = new Octokit({
+            auth: user.ghToken,
           });
+          console.log("Username: ", user.ghUsername);
+          octokit.rest.repos
+            .listForUser({
+              username: loggedUser.ghUsername,
+            })
+            .then((repos) => {
+              console.log("Repos count: ", repos.data.length);
+              res.send({
+                id: user.id,
+                name: user.name,
+                avatarUrl: user.avatarUrl,
+                reposCount: repos.data.length,
+                repos: simplifiedRepos(repos.data),
+              });
+            });
         });
     }
   );
 
   app.get("/users/me", isAuthenticated, (req, res) => {
-    const user = req.user as User | undefined;
-    res.send({
-      name: user?.name,
-      avatarUrl: user?.avatarUrl,
+    const user = req.user as User;
+    const octokit = new Octokit({
+      auth: user.ghToken,
     });
+    octokit.rest.repos
+      .listForUser({
+        username: user.ghUsername,
+      })
+      .then((repos) => {
+        console.log("Repos count", repos.data.length);
+        res.send({
+          name: user?.name,
+          avatarUrl: user?.avatarUrl,
+          reposCount: repos.data.length,
+          repos: simplifiedRepos(repos.data),
+        });
+      });
+  });
+
+  async function getRepoQuizQuestions(user: User, repoId: string) {
+    const octokit = new Octokit({
+      auth: user.ghToken,
+    });
+    const repoBranches = await octokit.rest.repos.listBranches({
+      owner: user.ghUsername,
+      repo: repoId,
+    });
+    if (!repoBranches.data.length) {
+      throw new Error("Cannot get branches data");
+    }
+    const latestSha = repoBranches.data[0].commit.sha;
+    const repoTree = await octokit.rest.git.getTree({
+      owner: user.ghUsername,
+      repo: repoId,
+      tree_sha: latestSha,
+      recursive: "true",
+    });
+    if (!repoTree.data.tree.length) {
+      throw new Error("Cannot get tree data");
+    }
+    let repoJson = {};
+    const filesContent = await Promise.all(
+      repoTree.data.tree
+        .filter((treeItem) => {
+          return (
+            treeItem.type === "blob" &&
+            treeItem.path?.endsWith(".js") &&
+            treeItem.url
+          );
+        })
+        .map(async ({ url }) => {
+          // Download file content
+          const fileContent = await octokit.request(url as any);
+          // Parse file content
+          const conentDecoded = Buffer.from(
+            fileContent.data.content,
+            "base64"
+          ).toString();
+          return conentDecoded;
+        })
+    );
+    console.log("JS files contents", filesContent);
+    return ["Some mock question"];
+  }
+
+  app.get("/quiz-questions/:repoId", isAuthenticated, (req, res) => {
+    const user = req.user as User;
+    const repoId = req.params.repoId;
+    getRepoQuizQuestions(user, repoId)
+      .then((questions) => {
+        return res.json(questions);
+      })
+      .catch((err) => {
+        res.status(500).send({ error: err.message });
+      });
+  });
+
+  app.post("/prompt-gpt", (req, res) => {
+    const prompt = req.body.prompt;
+    if (!prompt) {
+      res.status(400).send({ error: "Missing prompt" });
+      return;
+    }
+    promptGpt(prompt)
+      .then((response) => {
+        res.send({ response });
+      })
+      .catch((err) => {
+        res.status(500).send({ error: err.message });
+      });
   });
 
   app.get("/logout", (req, res, next) => {
