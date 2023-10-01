@@ -12,7 +12,8 @@ import pg from "pg";
 import connectPg from "connect-pg-simple";
 import path from "path";
 import { simplifiedRepos } from "./utils";
-import { promptGpt } from "./gpt";
+import { createFileQuestionsPrompt, promptGpt } from "./gpt";
+import bodyParser from "body-parser";
 
 const ghClientId = process.env.GITHUB_CLIENT_ID;
 const ghClientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -125,7 +126,9 @@ globalEm.then((em) => {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  app.use(cors());
+  // app.use(cors());
+
+  app.use(bodyParser.json());
 
   // Serve static react app
   app.use(express.static(path.join(__dirname, "../public")));
@@ -192,7 +195,7 @@ globalEm.then((em) => {
     }
   );
 
-  app.get("/users/me", isAuthenticated, (req, res) => {
+  app.get("/api/users/me", isAuthenticated, (req, res) => {
     const user = req.user as User;
     const octokit = new Octokit({
       auth: user.ghToken,
@@ -233,29 +236,30 @@ globalEm.then((em) => {
     if (!repoTree.data.tree.length) {
       throw new Error("Cannot get tree data");
     }
-    let repoJson = {};
+    const files = repoTree.data.tree.filter((treeItem) => {
+      return (
+        treeItem.type === "blob" &&
+        treeItem.path?.endsWith(".js") &&
+        treeItem.url
+      );
+    });
     const filesContent = await Promise.all(
-      repoTree.data.tree
-        .filter((treeItem) => {
-          return (
-            treeItem.type === "blob" &&
-            treeItem.path?.endsWith(".js") &&
-            treeItem.url
-          );
-        })
-        .map(async ({ url }) => {
-          // Download file content
-          const fileContent = await octokit.request(url as any);
-          // Parse file content
-          const conentDecoded = Buffer.from(
-            fileContent.data.content,
-            "base64"
-          ).toString();
-          return conentDecoded;
-        })
+      files.map(async ({ url }) => {
+        // Download file content
+        const fileContent = await octokit.request(url as any);
+        // Parse file content
+        const conentDecoded = Buffer.from(
+          fileContent.data.content,
+          "base64"
+        ).toString();
+        return conentDecoded;
+      })
     );
     console.log("JS files contents", filesContent);
-    return ["Some mock question"];
+    const prompt = createFileQuestionsPrompt(filesContent[0]);
+    const gptRes = await promptGpt(prompt);
+    console.log(gptRes);
+    return gptRes.content;
   }
 
   app.get("/quiz-questions/:repoId", isAuthenticated, (req, res) => {
@@ -271,6 +275,7 @@ globalEm.then((em) => {
   });
 
   app.post("/prompt-gpt", (req, res) => {
+    console.log(req.body);
     const prompt = req.body.prompt;
     if (!prompt) {
       res.status(400).send({ error: "Missing prompt" });
