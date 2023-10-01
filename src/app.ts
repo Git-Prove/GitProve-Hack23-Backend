@@ -8,7 +8,10 @@ import { Strategy as GitHubStrategy } from "passport-github2";
 import { globalEm } from "./dbconfig";
 import session from "express-session";
 import { Octokit } from "octokit";
+import pg from "pg";
+import connectPg from "connect-pg-simple";
 import path from "path";
+import { simplifiedRepos } from "./utils";
 
 const ghClientId = process.env.GITHUB_CLIENT_ID;
 const ghClientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -49,6 +52,8 @@ globalEm.then((em) => {
         const existingUser = await userRepo.findOneBy({ githubId: profile.id });
 
         if (existingUser) {
+          existingUser.ghToken = accessToken;
+          await userRepo.save(existingUser);
           return done(null, existingUser);
         }
 
@@ -91,9 +96,21 @@ globalEm.then((em) => {
     });
   });
 
+  const pgSession = connectPg(session);
+  const pgPool = new pg.Pool({
+    host: "localhost",
+    port: parseInt(process.env.DB_PORT || "5432"),
+    user: process.env.DB_USER || "postgres",
+    password: process.env.DB_PASS || "postgres",
+    database: process.env.DB_NAME || "postgres",
+  });
   const app = express();
   app.use(
     session({
+      store: new pgSession({
+        pool: pgPool,
+        tableName: "session",
+      }),
       secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
@@ -136,7 +153,9 @@ globalEm.then((em) => {
 
   app.get(
     "/users/profile/:profileId",
+    isAuthenticated,
     (req: express.Request<{ profileId?: string }>, res) => {
+      const loggedUser = req.user as User;
       const profileId = req.params.profileId;
       if (!profileId) {
         res.status(400).send({ error: "Missing profileId" });
@@ -150,32 +169,46 @@ globalEm.then((em) => {
             res.status(404).send({ error: "User not found" });
             return;
           }
-          const octokit = new Octokit();
+          const octokit = new Octokit({
+            auth: user.ghToken,
+          });
           console.log("Username: ", user.ghUsername);
-          const repos = octokit.rest.repos.listForUser({
-            username: user.ghUsername,
-          });
-          console.log("Repos: ", user);
-          res.send({
-            id: user.id,
-            name: user.name,
-            avatarUrl: user.avatarUrl,
-            repos: repos,
-          });
+          octokit.rest.repos
+            .listForUser({
+              username: loggedUser.ghUsername,
+            })
+            .then((repos) => {
+              console.log("Repos count: ", repos.data.length);
+              res.send({
+                id: user.id,
+                name: user.name,
+                avatarUrl: user.avatarUrl,
+                reposCount: repos.data.length,
+                repos: simplifiedRepos(repos.data),
+              });
+            });
         });
     }
   );
 
   app.get("/users/me", isAuthenticated, (req, res) => {
-    const user = req.user as User | undefined;
-    // const octokit = new Octokit();
-    // const repos = octokit.rest.repos.listForUser({
-    //   username: user?.name,
-    // });
-    res.send({
-      name: user?.name,
-      avatarUrl: user?.avatarUrl,
+    const user = req.user as User;
+    const octokit = new Octokit({
+      auth: user.ghToken,
     });
+    octokit.rest.repos
+      .listForUser({
+        username: user.ghUsername,
+      })
+      .then((repos) => {
+        console.log("Repos count", repos.data.length);
+        res.send({
+          name: user?.name,
+          avatarUrl: user?.avatarUrl,
+          reposCount: repos.data.length,
+          repos: simplifiedRepos(repos.data),
+        });
+      });
   });
 
   app.get("/logout", (req, res, next) => {
