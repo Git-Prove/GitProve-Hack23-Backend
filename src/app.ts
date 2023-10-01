@@ -12,6 +12,7 @@ import pg from "pg";
 import connectPg from "connect-pg-simple";
 import path from "path";
 import { simplifiedRepos } from "./utils";
+import { promptGpt } from "./gpt";
 
 const ghClientId = process.env.GITHUB_CLIENT_ID;
 const ghClientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -208,6 +209,79 @@ globalEm.then((em) => {
           reposCount: repos.data.length,
           repos: simplifiedRepos(repos.data),
         });
+      });
+  });
+
+  async function getRepoQuizQuestions(user: User, repoId: string) {
+    const octokit = new Octokit({
+      auth: user.ghToken,
+    });
+    const repoBranches = await octokit.rest.repos.listBranches({
+      owner: user.ghUsername,
+      repo: repoId,
+    });
+    if (!repoBranches.data.length) {
+      throw new Error("Cannot get branches data");
+    }
+    const latestSha = repoBranches.data[0].commit.sha;
+    const repoTree = await octokit.rest.git.getTree({
+      owner: user.ghUsername,
+      repo: repoId,
+      tree_sha: latestSha,
+      recursive: "true",
+    });
+    if (!repoTree.data.tree.length) {
+      throw new Error("Cannot get tree data");
+    }
+    let repoJson = {};
+    const filesContent = await Promise.all(
+      repoTree.data.tree
+        .filter((treeItem) => {
+          return (
+            treeItem.type === "blob" &&
+            treeItem.path?.endsWith(".js") &&
+            treeItem.url
+          );
+        })
+        .map(async ({ url }) => {
+          // Download file content
+          const fileContent = await octokit.request(url as any);
+          // Parse file content
+          const conentDecoded = Buffer.from(
+            fileContent.data.content,
+            "base64"
+          ).toString();
+          return conentDecoded;
+        })
+    );
+    console.log("JS files contents", filesContent);
+    return ["Some mock question"];
+  }
+
+  app.get("/quiz-questions/:repoId", isAuthenticated, (req, res) => {
+    const user = req.user as User;
+    const repoId = req.params.repoId;
+    getRepoQuizQuestions(user, repoId)
+      .then((questions) => {
+        return res.json(questions);
+      })
+      .catch((err) => {
+        res.status(500).send({ error: err.message });
+      });
+  });
+
+  app.post("/prompt-gpt", (req, res) => {
+    const prompt = req.body.prompt;
+    if (!prompt) {
+      res.status(400).send({ error: "Missing prompt" });
+      return;
+    }
+    promptGpt(prompt)
+      .then((response) => {
+        res.send({ response });
+      })
+      .catch((err) => {
+        res.status(500).send({ error: err.message });
       });
   });
 
